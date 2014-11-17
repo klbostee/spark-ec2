@@ -8,7 +8,7 @@ if [[ -e /sys/kernel/mm/transparent_hugepage/enabled ]]; then
 fi
 
 # Make sure we are in the spark-ec2 directory
-cd /root/spark-ec2
+pushd /root/spark-ec2
 
 source ec2-variables.sh
 
@@ -107,3 +107,5 @@ echo 1 > /proc/sys/vm/overcommit_memory
 # Add github to known hosts to get git@github.com clone to work
 # TODO(shivaram): Avoid duplicate entries ?
 cat /root/spark-ec2/github.hostkey >> /root/.ssh/known_hosts
+
+popd
