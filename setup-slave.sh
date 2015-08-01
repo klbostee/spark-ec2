@@ -8,22 +8,26 @@ if [[ -e /sys/kernel/mm/transparent_hugepage/enabled ]]; then
 fi
 
 # Make sure we are in the spark-ec2 directory
-cd /root/spark-ec2
+pushd /root/spark-ec2 > /dev/null
 
 source ec2-variables.sh
 
 # Set hostname based on EC2 private DNS name, so that it is set correctly
 # even if the instance is restarted with a different private DNS name
-PRIVATE_DNS=`wget -q -O - http://instance-data.ec2.internal/latest/meta-data/local-hostname`
+PRIVATE_DNS=`wget -q -O - http://169.254.169.254/latest/meta-data/local-hostname`
 hostname $PRIVATE_DNS
 echo $PRIVATE_DNS > /etc/hostname
 HOSTNAME=$PRIVATE_DNS  # Fix the bash built-in hostname variable too
 
-echo "Setting up slave on `hostname`..."
+echo "checking/fixing resolution of hostname"
+bash /root/spark-ec2/resolve-hostname.sh
 
-# Work around for R3 instances without pre-formatted ext3 disks
+# Work around for R3 or I2 instances without pre-formatted ext3 disks
 instance_type=$(curl http://169.254.169.254/latest/meta-data/instance-type 2> /dev/null)
-if [[ $instance_type == r3* ]]; then
+
+echo "Setting up slave on `hostname`... of type $instance_type"
+
+if [[ $instance_type == r3* || $instance_type == i2* || $instance_type == hi1* ]]; then
   # Format & mount using ext4, which has the best performance among ext3, ext4, and xfs based
   # on our shuffle heavy benchmark
   EXT4_MOUNT_OPTS="defaults,noatime,nodiratime"
@@ -34,12 +38,20 @@ if [[ $instance_type == r3* ]]; then
   mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0 /dev/sdb
   mount -o $EXT4_MOUNT_OPTS /dev/sdb /mnt
 
-  if [[ $instance_type == "r3.8xlarge" ]]; then
+  if [[ $instance_type == "r3.8xlarge" || $instance_type == "hi1.4xlarge" ]]; then
     mkdir /mnt2
     # To turn TRIM support on, uncomment the following line.
     #echo '/dev/sdc /mnt2  ext4  defaults,noatime,nodiratime,discard 0 0' >> /etc/fstab
-    mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0 /dev/sdc
-    mount -o $EXT4_MOUNT_OPTS /dev/sdc /mnt2
+    if [[ $instance_type == "r3.8xlarge" ]]; then
+      mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0 /dev/sdc      
+      mount -o $EXT4_MOUNT_OPTS /dev/sdc /mnt2
+    fi
+    # To turn TRIM support on, uncomment the following line.
+    #echo '/dev/sdf /mnt2  ext4  defaults,noatime,nodiratime,discard 0 0' >> /etc/fstab
+    if [[ $instance_type == "hi1.4xlarge" ]]; then
+      mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0 /dev/sdf      
+      mount -o $EXT4_MOUNT_OPTS /dev/sdf /mnt2
+    fi    
   fi
 fi
 
@@ -107,3 +119,16 @@ echo 1 > /proc/sys/vm/overcommit_memory
 # Add github to known hosts to get git@github.com clone to work
 # TODO(shivaram): Avoid duplicate entries ?
 cat /root/spark-ec2/github.hostkey >> /root/.ssh/known_hosts
+
+# Create /usr/bin/realpath which is used by R to find Java installations
+# NOTE: /usr/bin/realpath is missing in CentOS AMIs. See
+# http://superuser.com/questions/771104/usr-bin-realpath-not-found-in-centos-6-5
+echo '#!/bin/bash' > /usr/bin/realpath
+echo 'readlink -e "$@"' >> /usr/bin/realpath
+chmod a+x /usr/bin/realpath
+
+popd > /dev/null
+
+# this is to set the ulimit for root and other users
+echo '* soft nofile 1000000' >> /etc/security/limits.conf
+echo '* hard nofile 1000000' >> /etc/security/limits.conf

@@ -1,7 +1,17 @@
 #!/bin/bash
 
+sudo yum install -y -q pssh
+
+# usage: echo_time_diff name start_time end_time
+echo_time_diff () {
+  local format='%Hh %Mm %Ss'
+
+  local diff_secs="$(($3-$2))"
+  echo "[timing] $1: " "$(date -u -d@"$diff_secs" +"$format")"
+}
+
 # Make sure we are in the spark-ec2 directory
-cd /root/spark-ec2
+pushd /root/spark-ec2 > /dev/null
 
 # Load the environment variables specific to this AMI
 source /root/.bash_profile
@@ -11,8 +21,8 @@ source ec2-variables.sh
 
 # Set hostname based on EC2 private DNS name, so that it is set correctly
 # even if the instance is restarted with a different private DNS name
-PRIVATE_DNS=`wget -q -O - http://instance-data.ec2.internal/latest/meta-data/local-hostname`
-PUBLIC_DNS=`wget -q -O - http://instance-data.ec2.internal/latest/meta-data/hostname`
+PRIVATE_DNS=`wget -q -O - http://169.254.169.254/latest/meta-data/local-hostname`
+PUBLIC_DNS=`wget -q -O - http://169.254.169.254/latest/meta-data/hostname`
 hostname $PRIVATE_DNS
 echo $PRIVATE_DNS > /etc/hostname
 export HOSTNAME=$PRIVATE_DNS  # Fix the bash built-in hostname variable too
@@ -42,60 +52,28 @@ fi
 echo "Setting executable permissions on scripts..."
 find . -regex "^.+.\(sh\|py\)" | xargs chmod a+x
 
-echo "Running setup-slave on master to mount filesystems, etc..."
-source ./setup-slave.sh
-
-echo "SSH'ing to master machine(s) to approve key(s)..."
-for master in $MASTERS; do
-  echo $master
-  ssh $SSH_OPTS $master echo -n &
-  sleep 0.3
-done
-ssh $SSH_OPTS localhost echo -n &
-ssh $SSH_OPTS `hostname` echo -n &
-wait
-
-# Try to SSH to each cluster node to approve their key. Since some nodes may
-# be slow in starting, we retry failed slaves up to 3 times.
-TODO="$SLAVES $OTHER_MASTERS" # List of nodes to try (initially all)
-TRIES="0"                          # Number of times we've tried so far
-echo "SSH'ing to other cluster nodes to approve keys..."
-while [ "e$TODO" != "e" ] && [ $TRIES -lt 4 ] ; do
-  NEW_TODO=
-  for slave in $TODO; do
-    echo $slave
-    ssh $SSH_OPTS $slave echo -n
-    if [ $? != 0 ] ; then
-        NEW_TODO="$NEW_TODO $slave"
-    fi
-  done
-  TRIES=$[$TRIES + 1]
-  if [ "e$NEW_TODO" != "e" ] && [ $TRIES -lt 4 ] ; then
-      sleep 15
-      TODO="$NEW_TODO"
-      echo "Re-attempting SSH to cluster nodes to approve keys..."
-  else
-      break;
-  fi
-done
-
 echo "RSYNC'ing /root/spark-ec2 to other cluster nodes..."
+rsync_start_time="$(date +'%s')"
 for node in $SLAVES $OTHER_MASTERS; do
   echo $node
   rsync -e "ssh $SSH_OPTS" -az /root/spark-ec2 $node:/root &
   scp $SSH_OPTS ~/.ssh/id_rsa $node:.ssh &
-  sleep 0.3
+  sleep 0.1
 done
 wait
+rsync_end_time="$(date +'%s')"
+echo_time_diff "rsync /root/spark-ec2" "$rsync_start_time" "$rsync_end_time"
 
-# NOTE: We need to rsync spark-ec2 before we can run setup-slave.sh
-# on other cluster nodes
-echo "Running slave setup script on other cluster nodes..."
-for node in $SLAVES $OTHER_MASTERS; do
-  echo $node
-  ssh -t -t $SSH_OPTS root@$node "spark-ec2/setup-slave.sh" & sleep 0.3
-done
-wait
+echo "Running setup-slave on all cluster nodes to mount filesystems, etc..."
+setup_slave_start_time="$(date +'%s')"
+pssh --inline \
+    --host "$MASTERS $SLAVES" \
+    --user root \
+    --extra-args "-t -t $SSH_OPTS" \
+    --timeout 0 \
+    "spark-ec2/setup-slave.sh"
+setup_slave_end_time="$(date +'%s')"
+echo_time_diff "setup-slave" "$setup_slave_start_time" "$setup_slave_end_time"
 
 # Always include 'scala' module if it's not defined as a work around
 # for older versions of the scripts.
@@ -106,9 +84,12 @@ fi
 # Install / Init module
 for module in $MODULES; do
   echo "Initializing $module"
+  module_init_start_time="$(date +'%s')"
   if [[ -e $module/init.sh ]]; then
     source $module/init.sh
   fi
+  module_init_end_time="$(date +'%s')"
+  echo_time_diff "$module init" "$module_init_start_time" "$module_init_end_time"
   cd /root/spark-ec2  # guard against init.sh changing the cwd
 done
 
@@ -125,7 +106,12 @@ chmod u+x /root/spark/conf/spark-env.sh
 # Setup each module
 for module in $MODULES; do
   echo "Setting up $module"
+  module_setup_start_time="$(date +'%s')"
   source ./$module/setup.sh
-  sleep 1
+  sleep 0.1
+  module_setup_end_time="$(date +'%s')"
+  echo_time_diff "$module setup" "$module_setup_start_time" "$module_setup_end_time"
   cd /root/spark-ec2  # guard against setup.sh changing the cwd
 done
+
+popd > /dev/null

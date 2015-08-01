@@ -32,26 +32,32 @@ slave_cpus = int(os.popen(slave_cpu_command).read().strip())
 system_ram_kb = min(slave_ram_kb, master_ram_kb)
 
 system_ram_mb = system_ram_kb / 1024
+slave_ram_mb = slave_ram_kb / 1024
 # Leave some RAM for the OS, Hadoop daemons, and system caches
-if system_ram_mb > 100*1024:
-  spark_mb = system_ram_mb - 15 * 1024 # Leave 15 GB RAM
-elif system_ram_mb > 60*1024:
-  spark_mb = system_ram_mb - 10 * 1024 # Leave 10 GB RAM
-elif system_ram_mb > 40*1024:
-  spark_mb = system_ram_mb - 6 * 1024 # Leave 6 GB RAM
-elif system_ram_mb > 20*1024:
-  spark_mb = system_ram_mb - 3 * 1024 # Leave 3 GB RAM
-elif system_ram_mb > 10*1024:
-  spark_mb = system_ram_mb - 2 * 1024 # Leave 2 GB RAM
+if slave_ram_mb > 100*1024:
+  slave_ram_mb = slave_ram_mb - 15 * 1024 # Leave 15 GB RAM
+elif slave_ram_mb > 60*1024:
+  slave_ram_mb = slave_ram_mb - 10 * 1024 # Leave 10 GB RAM
+elif slave_ram_mb > 40*1024:
+  slave_ram_mb = slave_ram_mb - 6 * 1024 # Leave 6 GB RAM
+elif slave_ram_mb > 20*1024:
+  slave_ram_mb = slave_ram_mb - 3 * 1024 # Leave 3 GB RAM
+elif slave_ram_mb > 10*1024:
+  slave_ram_mb = slave_ram_mb - 2 * 1024 # Leave 2 GB RAM
 else:
-  spark_mb = max(512, system_ram_mb - 1300) # Leave 1.3 GB RAM
+  slave_ram_mb = max(512, slave_ram_mb - 1300) # Leave 1.3 GB RAM
 
-# Make tachyon_mb as spark_mb for now.
-tachyon_mb = spark_mb
+# Make tachyon_mb as slave_ram_mb for now.
+tachyon_mb = slave_ram_mb
 
-worker_instances = int(os.getenv("SPARK_WORKER_INSTANCES", 1))
-# Distribute equally cpu cores among worker instances
-worker_cores = max(slave_cpus / worker_instances, 1)
+worker_instances_str = ""
+worker_cores = slave_cpus
+
+if os.getenv("SPARK_WORKER_INSTANCES") != "":
+  worker_instances = int(os.getenv("SPARK_WORKER_INSTANCES", 1))
+  worker_instances_str = "%d" % worker_instances
+  # Distribute equally cpu cores among worker instances
+  worker_cores = max(slave_cpus / worker_instances, 1)
 
 template_vars = {
   "master_list": os.getenv("MASTERS"),
@@ -60,15 +66,16 @@ template_vars = {
   "hdfs_data_dirs": os.getenv("HDFS_DATA_DIRS"),
   "mapred_local_dirs": os.getenv("MAPRED_LOCAL_DIRS"),
   "spark_local_dirs": os.getenv("SPARK_LOCAL_DIRS"),
-  "default_spark_mem": "%dm" % spark_mb,
-  "spark_worker_instances": "%d" %  worker_instances,
+  "spark_worker_mem": "%dm" % slave_ram_mb,
+  "spark_worker_instances": worker_instances_str,
   "spark_worker_cores": "%d" %  worker_cores,
   "spark_master_opts": os.getenv("SPARK_MASTER_OPTS", ""),
   "spark_version": os.getenv("SPARK_VERSION"),
-  "shark_version": os.getenv("SHARK_VERSION"),
+  "tachyon_version": os.getenv("TACHYON_VERSION"),
   "hadoop_major_version": os.getenv("HADOOP_MAJOR_VERSION"),
   "java_home": os.getenv("JAVA_HOME"),
   "default_tachyon_mem": "%dMB" % tachyon_mb,
+  "system_ram_mb": "%d" % system_ram_mb,
   "aws_access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
   "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
   "pyspark_python": os.getenv("PYSPARK_PYTHON"),
@@ -86,7 +93,7 @@ for path, dirs, files in os.walk(template_dir):
         dest_file = os.path.join(dest_dir, filename)
         with open(os.path.join(path, filename)) as src:
           with open(dest_file, "w") as dest:
-            print "Configuring " + dest_file
+            print("Configuring " + dest_file)
             text = src.read()
             for key in template_vars:
               text = text.replace("{{" + key + "}}", template_vars[key] or '')
